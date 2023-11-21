@@ -1,5 +1,6 @@
 import time
 import math
+from pyproj import Proj, transform
 
 from PIL import Image, ImageDraw
 from pathlib import Path
@@ -14,6 +15,7 @@ import xml.etree.ElementTree as ET
 
 WIDTH = 1920
 HEIGHT = 1080
+DEBUG_VIEW = False
 
 
 def main():
@@ -53,6 +55,9 @@ def main():
 
             solar_array_id += 1
 
+            # put stuff on supabase
+
+
     driver.quit();
 
 
@@ -64,18 +69,63 @@ def create_solar_panel_array_from(polygon, namespaces):
 
     corners = extract_corners_from(coordinates)
 
-    heading_degs = calc_solar_array_heading_from(corners)
+    azimuth_degs = calc_solar_array_heading_from(corners)
     latitude, longitude = centroid(corners)
-    area = 1234 # todo: calculate area from corners
+    area_m2 = calc_area_m2(corners)
+    savings_gbp = calc_savings_gbp(area_m2, latitude, longitude, azimuth_degs, print_results=True)
 
     panel_array = {
         "latitude": latitude,
         "longitude": longitude,
-        "heading_degs": heading_degs,
-        "area": area
+        "heading_degs": azimuth_degs,
+        "area": area_m2,
+        "savings_gbp": savings_gbp
     }
 
     return panel_array
+
+
+def calc_savings_gbp(area_m2, lat, lon, azimuth_degs, print_results=False):
+    # Assumptions
+    roof_pitch_degs = 30
+    panel_efficiency_0_1 = 0.18
+    gen_watts_per_m2 = 1000
+    panel_degredation_rate_0_1 = 0.00608
+    panel_age_yrs = 5
+    battery_usage_multiplier = 0.4 # In Half Day
+    unit_rate_gbp_per_kwh = 0.28
+
+    # todo: use lat/lon and azimuth to determine this value
+    kwh_over_kwp = 780 # Leeds value
+
+    # First, we need to find the elevated area of the panels. To do this, we conduct the calculation: Measured Panel Area ÷ sin30
+    elevated_area_m2 = area_m2 / math.cos(math.radians(roof_pitch_degs))
+
+    # All panels are rated at 1000 w/m², so we multiply this by 1000 = 44,940.
+    peak_array_gen_watts = elevated_area_m2 * gen_watts_per_m2 * panel_efficiency_0_1
+
+    # We then need to calculate what this array will generate. We need the kWh/kWp value for this area, which for Leeds is around 780 (we can have one value for each MCS area- not too difficult).
+    # We multiply the kWp by this value: 8 x 780 = 6240 kWh/annum.
+    array_gen_kW = peak_array_gen_watts * kwh_over_kwp / 1000
+
+    # This will reduce slightly year-on-year, so let's assume these panels are 5 years old. At a yearly degradation rate of 0.608%, we lose 3.04% (this can be another constant). Therefore, we multiply this generation by 0.9696 = 6050 kWh/year.
+    degraded_array_gen_watts = array_gen_kW * (1 - panel_degredation_rate_0_1 * panel_age_yrs)
+
+    # We will assume an occupancy archetype of In Half Day (for diplomacy), so we can also have the Battery Usage Multiplier as a constant of 0.4. Therefore, we multiply this figure by 0.4 = 2420 kWh/annum.
+    solar_energy_used_by_battery = degraded_array_gen_watts * battery_usage_multiplier
+
+    # We will use a constant unit rate of 28p/kWh (0.28), so to get the savings, we multiply by this constant: £677.60.
+    savings_gbp = solar_energy_used_by_battery * unit_rate_gbp_per_kwh
+
+    if print_results:
+        print(f"{elevated_area_m2=:0.2f}")
+        print(f"{peak_array_gen_watts=:0.2f}")
+        print(f"{array_gen_kW=:0.2f}")
+        print(f"{degraded_array_gen_watts=:0.2f}")
+        print(f"{solar_energy_used_by_battery=:0.2f}")
+        print(f"{savings_gbp=:0.2f}")
+
+    return savings_gbp
 
 
 def extract_corners_from(coordinates):
@@ -99,20 +149,23 @@ def calc_solar_array_heading_from(corners):
     lat_0, lon_0 = corners[0]
     lat_1, lon_1 = corners[1]
 
-    heading = calculate_normal_heading(lat_0, lon_0, lat_1, lon_1)
+    azumith = calc_normal_azimuth(lat_0, lon_0, lat_1, lon_1)
 
-    return heading
+    # todo: check if the absolute azimuth is greater than 90 degrees, then the
+    # array is facing north to some degree
+
+    return azumith
 
 
-def calculate_normal_heading(lat1, lon1, lat2, lon2):
-    bearing = calculate_bearing(lat1, lon1, lat2, lon2)
+def calc_normal_azimuth(lat1, lon1, lat2, lon2):
+    bearing = calc_bearing(lat1, lon1, lat2, lon2)
     # Get the normal to the bearing (perpendicular)
     normal_heading = (bearing + 90) % 360  # You can also subtract 90 if necessary
 
     return 180 - normal_heading
 
 
-def calculate_bearing(lat1, lon1, lat2, lon2):
+def calc_bearing(lat1, lon1, lat2, lon2):
     # Convert latitude and longitude from degrees to radians
     lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
 
@@ -127,6 +180,35 @@ def calculate_bearing(lat1, lon1, lat2, lon2):
     initial_bearing = (initial_bearing + 360) % 360
 
     return initial_bearing
+
+
+def calc_area_m2(points_lat_lon):
+    # todo: this area calculation returns a result that is 97% of the value
+    # displayed on google earth. this was tested on a panel-array-sized
+    # rectangle and a neighbourhood-sized rectangle (safe to use for now, but we
+    # should investigate this difference)
+
+    if len(points_lat_lon) < 3:  # Need at least 3 points to form a polygon
+        return 0
+
+    # Define the projection: WGS84 Latitude/Longitude and UTM
+    wgs84 = Proj(init='epsg:4326')
+    utm = Proj(init='epsg:32633')  # You might need to change the UTM zone
+
+    def to_utm(lat, lon):
+        return transform(wgs84, utm, lon, lat)
+
+    # Convert points to UTM
+    utm_points = [to_utm(lat, lon) for lat, lon in points_lat_lon]
+
+    # Calculate area using the Shoelace formula
+    area = 0.0
+    for i in range(len(utm_points)):
+        x0, y0 = utm_points[i]
+        x1, y1 = utm_points[(i + 1) % len(utm_points)]
+        area += x0 * y1 - x1 * y0
+
+    return abs(area) / 2.0
 
 
 def centroid(points):
@@ -202,7 +284,9 @@ def take_screenshot(image_path: Path, driver, array_heading_degs: float):
     img = Image.open(image_path)
 
     cropped_img = crop(img)
-    add_markers_to(cropped_img, array_heading_degs)
+
+    if DEBUG_VIEW:
+        add_debug_markers_to(cropped_img, array_heading_degs)
 
     cropped_img.save(image_path)
 
@@ -218,12 +302,13 @@ def crop(img):
     return cropped_img
 
 
-def add_markers_to(cropped_img, array_heading_degs: float):
+def add_debug_markers_to(cropped_img, array_heading_degs: float):
     centre_x, centre_y = cropped_img.width // 2, cropped_img.height // 2
     draw = ImageDraw.Draw(cropped_img)
 
     add_heading_indicator_to(array_heading_degs, centre_x, centre_y, draw)
     add_centre_marker_to(centre_x, centre_y, draw)
+    highlight_panel_array_area(cropped_img, draw)
 
 
 def add_heading_indicator_to(heading, centre_x, centre_y, draw):
@@ -253,6 +338,11 @@ def add_centre_marker_to(centre_x, centre_y, draw):
 def calc_savings(array_area_m2: float, array_heading: float) -> float:
     # todo: use spreadsheet model from chris to work out what the savings could be for this property
     return 1234
+
+
+def highlight_panel_array_area(cropped_img, draw):
+    # todo: add some debug view on top of the
+    return False
 
 
 if __name__ == '__main__':
