@@ -41,32 +41,57 @@ def main():
         polygon = placemark.find('.//{http://www.opengis.net/kml/2.2}Polygon', namespaces)
 
         if polygon is not None:
-            coordinates = polygon.find('.//{http://www.opengis.net/kml/2.2}coordinates', namespaces)
+            panel_array = create_solar_panel_array_from(polygon, namespaces)
 
-            if coordinates is not None:
-                points = coordinates.text.strip().split(' ')
+            lat = panel_array["latitude"]
+            lon = panel_array["longitude"]
+            heading = panel_array["heading_degs"]
 
-                corners = []
-                for p in points:
-                    lon_str, lat_str, _ = p.strip().split(',')
+            print(f"Taking screenshot for solar panel array {solar_array_id} at {lat}, {lon} with heading {heading}")
+            img_path = f"{solar_array_id}_{heading}.png"
+            screenshot_solar_panel_array_at(lat, lon, driver, img_path, heading)
 
-                    lat = float(lat_str)
-                    lon = float(lon_str)
-
-                    corner = (lat, lon)
-                    corners.append(corner)
-
-                heading_degs = calc_solar_array_heading_from(corners)
-
-                latitude, longitude = centroid(corners)
-
-                print(f"Taking screenshot for solar panel array {solar_array_id} at {latitude}, {longitude} with heading {heading_degs}")
-                img_path = f"{solar_array_id}_{heading_degs}.png"
-                screenshot_solar_panel_array_at(latitude, longitude, driver, img_path, heading_degs)
-
-                solar_array_id += 1
+            solar_array_id += 1
 
     driver.quit();
+
+
+def create_solar_panel_array_from(polygon, namespaces):
+    coordinates = polygon.find('.//{http://www.opengis.net/kml/2.2}coordinates', namespaces)
+
+    if coordinates is None:
+        return None
+
+    corners = extract_corners_from(coordinates)
+
+    heading_degs = calc_solar_array_heading_from(corners)
+    latitude, longitude = centroid(corners)
+    area = 1234 # todo: calculate area from corners
+
+    panel_array = {
+        "latitude": latitude,
+        "longitude": longitude,
+        "heading_degs": heading_degs,
+        "area": area
+    }
+
+    return panel_array
+
+
+def extract_corners_from(coordinates):
+    points = coordinates.text.strip().split(' ')
+
+    corners = []
+    for p in points:
+        lon_str, lat_str, _ = p.strip().split(',')
+
+        lat = float(lat_str)
+        lon = float(lon_str)
+
+        corner = (lat, lon)
+        corners.append(corner)
+
+    return corners
 
 
 def calc_solar_array_heading_from(corners):
@@ -127,19 +152,22 @@ def screenshot_solar_panel_array_at(lat: float, lon: float, driver, img_path, ar
 
 
 def load_google_earth_at(lat, lon, driver):
-    distance = 80
-    altitude = 8
-    yaw = 35
+    distance = 2000
+    verticalFoV_degs = 35
     heading = 0 # Facing due north
 
-    # todo: determine tilt from google earth coverage map API (0 if 2D, 45 if 3D)
-    tilt = 0 # 0 is looking directly down, 90 is looking at horizon
+    # todo: determine tilt and lat offset from google earth coverage map API (0 if 2D, 45 if 3D)
+    has_3d_map_view = True
 
-    url = f"https://earth.google.com/web/@{lat},{lon},{altitude}a,{distance}d,{yaw}y,{heading}h,{tilt}t,0r"
+    tilt = 45 if has_3d_map_view else 0
+    lat_offset = 0.00016 if has_3d_map_view else 0
+
+    # url = f"https://earth.google.com/web/@{lat},{lon},{altitude}a,{distance}d,{yaw}y,{heading}h,{tilt}t,0r"
+    url = f"https://earth.google.com/web/@{lat + lat_offset},{lon},{distance}d,{math.radians(verticalFoV_degs)}y,{heading}h,{tilt}t,0r"
     print(url)
 
     driver.get(url)
-    time.sleep(5)
+    time.sleep(5.5)
 
 
 def clear_map_window_area(driver):
@@ -171,18 +199,23 @@ def close_top_bar(actions):
 def take_screenshot(image_path: Path, driver, array_heading_degs: float):
     driver.save_screenshot(image_path)
 
-    vertical_padding = 80 # to remove the top bar and bottom icons
+    img = Image.open(image_path)
+
+    cropped_img = crop(img)
+    add_markers_to(cropped_img, array_heading_degs)
+
+    cropped_img.save(image_path)
+
+
+def crop(img):
+    vertical_padding = 140 # to remove the top bar and bottom icons
     image_height = HEIGHT - vertical_padding * 2
     horizontal_padding = (WIDTH - image_height) / 2
     crop_area = (horizontal_padding, vertical_padding, WIDTH - horizontal_padding, HEIGHT - vertical_padding) # left, upper, right, lower
 
-    img = Image.open(image_path)
     cropped_img = img.crop(crop_area)
 
-    add_markers_to(cropped_img, array_heading_degs)
-
-    # Save the modified image back over the original image
-    cropped_img.save(image_path)
+    return cropped_img
 
 
 def add_markers_to(cropped_img, array_heading_degs: float):
