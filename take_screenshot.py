@@ -1,3 +1,6 @@
+import warnings
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 import time
 import math
 from pyproj import Proj, transform
@@ -12,6 +15,8 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.chrome.options import Options
 import xml.etree.ElementTree as ET
 
+from model import *
+
 
 WIDTH = 1920
 HEIGHT = 1080
@@ -19,15 +24,47 @@ DEBUG_VIEW = False
 
 
 def main():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless")  # Runs Chrome in headless mode.
-    chrome_options.add_argument("--disable-gpu")  # Disables GPU hardware acceleration. If software renderer is not in place, then the headless browser will fail.
-    chrome_options.add_argument(f"--window-size={WIDTH}x{HEIGHT}")
+    buildings: List[Building] = extract_buildings_from('minimal.kml')
 
-    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
+    google_chrome = setup_headless_chrome_driver()
 
-    # Load and parse the XML
-    tree = ET.parse('region-5.kml')
+    for building in buildings:
+        img_path = take_google_earth_screenshot_of(building["location"], google_chrome)
+
+    google_chrome.quit();
+
+
+def extract_buildings_from(kml_file_path: Path):
+    solar_arrays = extract_solar_array_data_from(kml_file_path)
+
+    buildings_dict = {}
+
+    for solar_array in solar_arrays:
+        address = get_address_of(solar_array["location"])
+
+        if address not in buildings_dict:
+            building_info = { "address": address, "arrays": [] }
+            buildings_dict[address] = building_info
+
+        buildings_dict[address]["arrays"].append(solar_array)
+
+    buildings = []
+    for address, building_info in buildings_dict.items():
+        buildings.append(Building(address, building_info["arrays"]))
+
+    return buildings
+
+
+
+def get_address_of(location: Location) -> str:
+    # return a street address associated with this location: use same API as Joe has used for this task
+
+    # todo
+    return "the road to nowhere"
+
+
+def extract_solar_array_data_from(kml_file_path: Path):
+    tree = ET.parse(kml_file_path)
     root = tree.getroot()
 
     # Define the namespaces (important for finding elements)
@@ -37,28 +74,31 @@ def main():
     }
 
     # Iterate over all placemarks
-    solar_array_id = 0
+    solar_arrays = []
 
+    count = 0
     for placemark in root.findall('.//{http://www.opengis.net/kml/2.2}Placemark', namespaces):
         polygon = placemark.find('.//{http://www.opengis.net/kml/2.2}Polygon', namespaces)
 
         if polygon is not None:
-            panel_array = create_solar_panel_array_from(polygon, namespaces)
+            array = create_solar_panel_array_from(polygon, namespaces)
+            solar_arrays.append(array)
+            count += 1
 
-            lat = panel_array["latitude"]
-            lon = panel_array["longitude"]
-            heading = panel_array["heading_degs"]
+            print(f"Created solar array {count}")
 
-            print(f"Taking screenshot for solar panel array {solar_array_id} at {lat}, {lon} with heading {heading}")
-            img_path = f"{solar_array_id}_{heading}.png"
-            screenshot_solar_panel_array_at(lat, lon, driver, img_path, heading)
-
-            solar_array_id += 1
-
-            # put stuff on supabase
+    return solar_arrays
 
 
-    driver.quit();
+def setup_headless_chrome_driver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")  # Runs Chrome in headless mode.
+    chrome_options.add_argument("--disable-gpu")  # Disables GPU hardware acceleration. If software renderer is not in place, then the headless browser will fail.
+    chrome_options.add_argument(f"--window-size={WIDTH}x{HEIGHT}")
+
+    driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=chrome_options)
+
+    return driver
 
 
 def create_solar_panel_array_from(polygon, namespaces):
@@ -72,11 +112,10 @@ def create_solar_panel_array_from(polygon, namespaces):
     azimuth_degs = calc_solar_array_heading_from(corners)
     latitude, longitude = centroid(corners)
     area_m2 = calc_area_m2(corners)
-    savings_gbp = calc_savings_gbp(area_m2, latitude, longitude, azimuth_degs, print_results=True)
+    savings_gbp = calc_savings_gbp(area_m2, latitude, longitude, azimuth_degs)
 
     panel_array = {
-        "latitude": latitude,
-        "longitude": longitude,
+        "location": Location(latitude, longitude),
         "heading_degs": azimuth_degs,
         "area": area_m2,
         "savings_gbp": savings_gbp
@@ -211,14 +250,14 @@ def calc_area_m2(points_lat_lon):
     return abs(area) / 2.0
 
 
-def centroid(points):
+def centroid(points: List[Location]):
     if not points:
         return None
 
     lat_sum, lon_sum = 0, 0
-    for (lat, lon) in points:
-        lat_sum += lat
-        lon_sum += lon
+    for loc in points:
+        lat_sum += loc["lat"]
+        lon_sum += loc["lon"]
 
     centroid_lat = lat_sum / len(points)
     centroid_lon = lon_sum / len(points)
@@ -226,14 +265,15 @@ def centroid(points):
     return (centroid_lat, centroid_lon)
 
 
-def screenshot_solar_panel_array_at(lat: float, lon: float, driver, img_path, array_heading_degs: float) -> Path:
-    """Take a screenshot of property at the given latitude and longitude"""
-    load_google_earth_at(lat, lon, driver)
-    clear_map_window_area(driver)
-    take_screenshot(img_path, driver, array_heading_degs)
+def screenshot_solar_panel_array_at(location: Location, driver, img_path, array_heading_degs: float) -> Path:
+    img_path = take_google_earth_screenshot_of(location, driver)
+
+    # todo: is this function still needed
+
+    # take_screenshot(img_path, driver, array_heading_degs)
 
 
-def load_google_earth_at(lat, lon, driver):
+def take_google_earth_screenshot_of(location, driver):
     distance = 2000
     verticalFoV_degs = 35
     heading = 0 # Facing due north
@@ -245,11 +285,13 @@ def load_google_earth_at(lat, lon, driver):
     lat_offset = 0.00016 if has_3d_map_view else 0
 
     # url = f"https://earth.google.com/web/@{lat},{lon},{altitude}a,{distance}d,{yaw}y,{heading}h,{tilt}t,0r"
-    url = f"https://earth.google.com/web/@{lat + lat_offset},{lon},{distance}d,{math.radians(verticalFoV_degs)}y,{heading}h,{tilt}t,0r"
+    url = f"https://earth.google.com/web/@{location.lat + lat_offset},{location.lon},{distance}d,{math.radians(verticalFoV_degs)}y,{heading}h,{tilt}t,0r"
     print(url)
 
     driver.get(url)
     time.sleep(5.5)
+
+    clear_map_window_area(driver)
 
 
 def clear_map_window_area(driver):
@@ -276,6 +318,7 @@ def close_top_bar(actions):
     # Click the "X" in top right of screen
     actions.move_by_offset(x_coordinate, y_coordinate).click().perform()
     time.sleep(0.3);
+
 
 
 def take_screenshot(image_path: Path, driver, array_heading_degs: float):
