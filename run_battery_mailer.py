@@ -28,7 +28,7 @@ HEIGHT = 1080
 
 
 def main():
-    buildings: List[Building] = extract_buildings_from('region-5.kml')
+    buildings: List[Building] = extract_buildings_from('minimal.kml')
 
     google_chrome = setup_headless_chrome_driver()
 
@@ -42,7 +42,7 @@ def main():
 def create_new_database_record_for(building: Building, driver):
     google_earth_url = generate_google_earth_url_for(building.location)
 
-    img_path = f"{building.address}.png"
+    img_path = f"{building.address_str}.png"
     take_google_earth_screenshot(google_earth_url, img_path, driver)
 
     # todo: add production supabase url and key
@@ -64,7 +64,9 @@ def create_new_database_record_for(building: Building, driver):
     with open(img_path, "rb") as file:
         bucket_name = "existing-solar-property-screenshots"
         img_path_encoded = quote(img_path)
-        data = supabase.storage.from_(bucket_name).upload(img_path_encoded, file)
+
+        data = supabase.storage.from_(bucket_name).upload(img_path_encoded, file, file_options={'x-upsert': 'true'})
+
         public_url = supabase.storage.from_(bucket_name).get_public_url(img_path_encoded)
 
         database_entry["screenshot_url"] = public_url
@@ -95,7 +97,7 @@ def generate_google_earth_url_for(location: Location):
     return url
 
 
-# 
+#
 def catch_auto_audit_errors_on(building) -> AutoAuditError:
     errors = []
 
@@ -137,17 +139,37 @@ def extract_buildings_from(kml_file_path: Path):
 
     for solar_array in solar_arrays:
         address = get_address_of(solar_array.location)
+        formatted_addr = address["formatted_address"]
 
-        if address not in buildings_dict:
+        if formatted_addr not in buildings_dict:
             building_info = { "address": address, "arrays": [] }
-            buildings_dict[address] = building_info
+            buildings_dict[formatted_addr] = building_info
 
-        buildings_dict[address]["arrays"].append(solar_array)
+        buildings_dict[formatted_addr]["arrays"].append(solar_array)
 
-    print("Combinging arrays into buildings...")
+    print("Combining arrays into buildings...")
+    # buildings = []
+    # for address, building_info in buildings_dict.items():
+    #     new_building = Building(address, building_info["arrays"])
+    #     buildings.append(new_building)
+
     buildings = []
-    for address, building_info in buildings_dict.items():
-        buildings.append(Building(address, building_info["arrays"]))
+
+    for solar_array in solar_arrays:
+        address = get_address_of(solar_array.location)
+        formatted_addr = address["formatted_address"]
+
+        if formatted_addr not in buildings_dict:
+            building_info = { "address": address, "arrays": [] }
+            buildings_dict[formatted_addr] = building_info
+
+        buildings_dict[formatted_addr]["arrays"].append(solar_array)
+
+    print("Combining arrays into buildings...")
+
+    for formatted_addr, building_info in buildings_dict.items():
+        new_building = Building(formatted_addr, building_info["address"], building_info["arrays"])
+        buildings.append(new_building)
 
     print(f"Created {len(buildings)} buildings...")
 
@@ -162,7 +184,7 @@ def get_address_of(location: Location):
 
     # todo: handle the case where the address look up fails
 
-    return response['results'][0]['formatted_address']
+    return response['results'][0]
 
 
 def extract_solar_array_data_from(kml_file_path: Path) -> List[SolarPanelArray]:

@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import List
+from typing import List, Dict
 from math_utils import centroid, Location
 
 
@@ -20,8 +20,9 @@ class SolarPanelArray:
 
 
 class Building:
-    def __init__(self, address: str, solar_arrays: List[SolarPanelArray]):
-        self.address: str = address
+    def __init__(self, address_str: str, address: Dict[any, any], solar_arrays: List[SolarPanelArray]):
+        self.address_str: str = address_str
+        self.address: Dict[any, any] = address
         self.solar_arrays: List[SolarPanelArray] = solar_arrays
 
         # Derived state
